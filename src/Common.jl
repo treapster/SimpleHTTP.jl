@@ -1,7 +1,7 @@
 
 module Common
 
-import JSON3
+import JSON
 import MacroTools
 using Match
 const Maybe{T} = Union{T, Nothing}
@@ -13,7 +13,7 @@ const default_response_headers::Vector{Pair{String, String}} =
     Pair{String, String}["Content-Type"=>"application/json;charset=UTF-8"]
 
 const AbstractExpr = Union{Symbol, Expr, QuoteNode, String}
-@enum ArgLoc QUERY URL JSONFIELD JSON ALLHEADERS HEADER
+@enum ArgLoc QUERY URL JSONFIELD JSONBODY ALLHEADERS HEADER
 
 @kwdef struct ParamData
     type::AbstractExpr
@@ -26,8 +26,8 @@ function ParamData(type, default, loc)
     return ParamData(type, default, loc, "")
 end
 
-write_json(x) = JSON3.write(x; allow_inf = true)
-read_json(x, T) = JSON3.read(x, T; allow_inf = true)
+write_json(x) = JSON.json(x; allownan = true)
+read_json(x, T) = JSON.parse(x, T; allownan = true)
 deserialize(x, T) = read_json(x, T)
 serialize(x) = write_json(x)
 
@@ -67,7 +67,7 @@ end
 function get_param_data(argname, type_expr, path, default)
     if MacroTools.@capture(type_expr, Json{argtype_})
         isnothing(default) || error("Full body can't have default value")
-        return ParamData(argtype, default, JSON)
+        return ParamData(argtype, default, JSONBODY)
     end
     MacroTools.@capture(type_expr, JsonField{argtype_}) &&
         return ParamData(argtype, default, JSONFIELD)

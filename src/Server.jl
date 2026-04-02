@@ -4,7 +4,7 @@ module Server
 
 using ..Common: make_response, report_error, ParamData, read_json,
     parse_params, write_json, ArgLoc, serialize,
-    JSONFIELD, URL, QUERY, JSON, ALLHEADERS, HEADER, ErrorResponse
+    JSONFIELD, URL, QUERY, JSONBODY, ALLHEADERS, HEADER, ErrorResponse
 
 import OrderedCollections: OrderedDict
 import MacroTools
@@ -124,7 +124,7 @@ function construct_handler(
                 $(param.default)
             end))
             continue
-        elseif param.loc == JSON
+        elseif param.loc == JSONBODY
             push!(arg_defs, :($argname = parsedbody))
             continue
         elseif param.loc ∈ [URL, QUERY, HEADER]
@@ -209,7 +209,7 @@ end
 
 function get_bodytype(params)
     body_params = filter(((_, par),) -> par.loc == JSONFIELD, params)
-    body_type_param = filter(((_, par),) -> par.loc == JSON, params)
+    body_type_param = filter(((_, par),) -> par.loc == JSONBODY, params)
     if !isempty(body_params) && !isempty(body_type_param)
         error("Cannot have Json and JsonField in one signature")
     elseif !isempty(body_params)

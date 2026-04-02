@@ -3,7 +3,7 @@ module Client
 
 using ..Common: make_response, report_error, ParamData, read_json,
     parse_params, write_json, ArgLoc, ErrorResponse, deserialize,
-    JSONFIELD, QUERY, URL, JSONFIELD, JSON, ALLHEADERS, HEADER
+    JSONFIELD, QUERY, URL, JSONFIELD, JSONBODY, ALLHEADERS, HEADER
 
 import OrderedCollections: OrderedDict
 import MacroTools
@@ -118,7 +118,7 @@ function construct_expressions(cfg, path, method, sig, err_map)
     end
 
     body_params = filter(((_, par),) -> par.loc == JSONFIELD, params)
-    full_body_param = filter(((_, par),) -> par.loc == JSON, params)
+    full_body_param = filter(((_, par),) -> par.loc == JSONBODY, params)
     query_params = filter(((_, par),) -> par.loc == QUERY, params)
     url_params = filter(((_, par),) -> par.loc == URL, params)
     headers_var, headers_def = get_headers_def(params)

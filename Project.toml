@@ -1,11 +1,11 @@
 name = "SimpleHTTP"
 uuid = "03cab53d-42c8-4ab5-8d7c-14ec844b19aa"
-authors = ["Denis Revunov <rnovds@gmail.com>"]
 version = "0.1.0"
+authors = ["Denis Revunov <rnovds@gmail.com>"]
 
 [deps]
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 MacroTools = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
 Match = "7eb4fadd-790c-5f42-8a69-bfa0b872bfbf"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
@@ -15,7 +15,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 HTTP = "1.10.17"
-JSON3 = "1.14.3"
+JSON = "1.5.0"
 MacroTools = "0.5.16"
 Match = "2.4.0"
 OrderedCollections = "1.8.1"
