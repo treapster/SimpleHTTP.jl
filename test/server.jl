@@ -1,21 +1,20 @@
 
 module ServerTest
 
-using SimpleHTTP
+using SimpleHTTP.Server: Server, Router, JsonField as Json, Header, Headers
 
 struct UserNotFoundError <: Exception
     msg::String
 end
 
+using Sockets: @ip_str
 using UUIDs: uuid4, UUID
-const cfg = ServerConfig(
-    ip = ip"0.0.0.0",
-    port = 8080,
-    path = "/api/v1/test",
-    verbosity_500 = 2,
-)
+const SERVER_IP = ip"0.0.0.0"
+const SERVER_PORT = 8080
 
-const error_codes = Pair{DataType, Int}[
+const cfg = Router(path = "api/v1/test")
+
+errors_map = Pair{Type, Int}[
     UserNotFoundError => 404,
 ]
 
@@ -39,7 +38,6 @@ end
 const users = Dict{UUID, User}()
 
 Server.@post(
-    cfg,
     "/users/create",
     function create_user(data::Json{CreateUserRequest})::UUID
         id = uuid4()
@@ -50,65 +48,76 @@ Server.@post(
         )
         return id
     end,
-    error_codes
+    errors_map
 )
 
 Server.@delete(
-    cfg,
     "/users/delete/{id}",
     function delete_user(id::UUID)::Nothing
         delete!(users, [id])
         return nothing
     end,
-    error_codes
+    errors_map
 )
 
 Server.@post(
-    cfg,
     "/users/set_age/{id}",
     function set_age(id::UUID, age::Int)::Nothing
         users[id].age = age
         return nothing
     end,
-    error_codes
+    errors_map
 )
 
 Server.@get(
-    cfg,
     "/users/get/{id}",
     function get_user(id::UUID)::User
         user = get(users, id, nothing)
         isnothing(user) && throw(UserNotFoundError("User id $id not found"))
-        return users[id]
+        @show user
+        return user
     end,
-    error_codes
+    errors_map
 )
 
 Server.@get(
-    cfg,
     "/users/get",
     function get_all_users()::Dict{UUID, User}
         return users
     end,
-    error_codes
+    errors_map
 )
 
+macro sym_str(str)
+    return QuoteNode(Symbol(str))
+end
+
+
 Server.@get(
-    cfg,
     "/users/echo_lang",
-    function echo_lang(lang::Headers["Accept-Language"] = "en")::String
+    function echo_lang(lang::Header{String, sym"Accept-Language"} = "en")::String
         return lang
     end,
-    error_codes
+    errors_map
 )
 
 Server.@get(
-    cfg,
     "/users/echo_headers",
-    function echo_headers(hdrs::Headers)::Dict{String, String}
+    function echo_headers(hdrs::Headers{Dict{String, Any}})::Dict{String, String}
         return hdrs
     end,
-    error_codes
+    errors_map,
 )
+
+
+function start()
+    for name in names(@__MODULE__; all = true)
+        hdl = getproperty(@__MODULE__, name)
+        if hdl isa Server.Handler
+            Server.register!(cfg, hdl)
+        end
+    end
+    return Server.serve!(router, SERVER_IP, SERVER_PORT)
+end
 
 end

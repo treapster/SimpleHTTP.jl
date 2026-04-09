@@ -13,23 +13,15 @@ const default_response_headers::Vector{Pair{String, String}} =
     Pair{String, String}["Content-Type"=>"application/json;charset=UTF-8"]
 
 const AbstractExpr = Union{Symbol, Expr, QuoteNode, String}
-@enum ArgLoc QUERY URL JSONFIELD JSONBODY ALLHEADERS HEADER
 
 @kwdef struct ParamData
-    type::AbstractExpr
+    type::Type
     default::Maybe{AbstractExpr}
-    loc::ArgLoc
-    headerKey::String
-end
-
-function ParamData(type, default, loc)
-    return ParamData(type, default, loc, "")
 end
 
 write_json(x) = JSON.json(x; allownan = true)
 read_json(x, T) = JSON.parse(x, T; allownan = true)
 deserialize(x, T) = read_json(x, T)
-serialize(x) = write_json(x)
 
 function make_response(code, content)
     if code == 204
@@ -64,37 +56,19 @@ function ErrorResponse(e::Exception)
     return ErrorResponse(error_string(e))
 end
 
-function get_param_data(argname, type_expr, path, default)
-    if MacroTools.@capture(type_expr, Json{argtype_})
-        isnothing(default) || error("Full body can't have default value")
-        return ParamData(argtype, default, JSONBODY)
-    end
-    MacroTools.@capture(type_expr, JsonField{argtype_}) &&
-        return ParamData(argtype, default, JSONFIELD)
+# metatype is either extractor or serializer, it is stripped from generated signature
+abstract type MetaType end
 
-    MacroTools.@capture(type_expr, Json) &&
-        error("Json type not provided for \"$argname\"")
-    MacroTools.@capture(type_expr, JsonField) &&
-        error("Field type not provided for \"$argname\"")
-
-    MacroTools.@capture(type_expr, Headers) &&
-        return ParamData(:(Dict{String, String}), default, ALLHEADERS)
-
-    if MacroTools.@capture(type_expr, Headers[key_])
-        key isa String || error("expected string for header key in $argname")
-        return ParamData(:String, default, HEADER, lowercase(key))
-    end
-
-    if contains(path, '{' * string(argname) * '}')
-        isnothing(default) || error("Url params cannot have default value")
-        return ParamData(type_expr, default, URL)
-    end
-
-    return ParamData(type_expr, default, QUERY)
-end
-
-function parse_params(args, path, route_name)
+function parse_params(mod, args, path, route_name)
     params = OrderedDict{Symbol, ParamData}()
+
+    url_args = Symbol[]
+    for arg in split(path, '/')
+        m = match(r"\{(\w+)\}", arg)
+        isnothing(m) && continue
+        argname = only(m.captures)
+        push!(url_args, Symbol(argname))
+    end
 
     for arg_expr in args
         argdefault = nothing
@@ -104,9 +78,34 @@ function parse_params(args, path, route_name)
 
         haskey(params, argname) &&
             error("route $route_name: duplicate argument $argname")
-        params[argname] = get_param_data(argname, argtype, path, argdefault)
+
+        T = Core.eval(mod, argtype)
+        if T isa Type{<:MetaType}
+            params[argname] = ParamData(T, argdefault)
+            continue
+        end
+        extr = if argname ∈ url_args
+            Url{T}
+        else
+            Query{T}
+        end
+        params[argname] = ParamData(extr, argdefault)
+    end
+
+    for arg in url_args
+        haskey(params, arg) || error(
+            "\"$argname\" provided in path but has no corresponding parameter in signature",
+        )
     end
     return params
+end
+
+
+function strip_meta(type::Type)
+    if type isa Type{<:MetaType}
+        return first(type.parameters)
+    end
+    return type
 end
 
 end

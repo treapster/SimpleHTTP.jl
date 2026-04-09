@@ -9,7 +9,7 @@ include("client.jl")
 import UUIDs: uuid4, UUID
 import .ServerTest: UserNotFoundError
 import .ClientTest as App
-server = Server.serve!(ServerTest.cfg)
+server = ServerTest.start(ServerTest.cfg)
 
 struct UnexpectedSuccess <: Exception
     msg::String

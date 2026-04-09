@@ -2,12 +2,53 @@
 module Client
 
 using ..Common: make_response, report_error, ParamData, read_json,
-    parse_params, write_json, ArgLoc, ErrorResponse, deserialize,
-    JSONFIELD, QUERY, URL, JSONFIELD, JSONBODY, ALLHEADERS, HEADER
+    parse_params, write_json, ErrorResponse, deserialize, MetaType, strip_meta
 
 import OrderedCollections: OrderedDict
 import MacroTools
 import HTTP
+
+abstract type RequestSerializer{T} <: MetaType end
+abstract type RequestBodySerializer{T} <: RequestSerializer{T} end
+abstract type RequestHeadersSerializer{T} <: RequestSerializer{T} end
+abstract type RequestUrlSerializer{T} <: RequestSerializer{T} end
+abstract type RequestQuerySerializer{T} <: RequestSerializer{T} end
+
+struct JsonField{T} <: RequestBodySerializer{T} end
+struct Json{T} <: RequestBodySerializer{T} end
+struct Url{T} <: RequestUrlSerializer{T} end
+struct Query{T} <: RequestQuerySerializer{T} end
+struct Header{T, Sym} <: RequestHeadersSerializer{Dict{String, String}} end
+struct Headers{T} <: RequestHeadersSerializer{T} end
+
+function serialize(::JsonField, args)
+    return write_json(args)
+end
+
+function serialize(::Json, args)
+    arg = only(values(args))
+    return write_json(arg)
+end
+
+function serialize(::Url, args)
+    return Dict{Symbol, String}(
+        name => string(val) for (name, val) in args
+    )
+end
+
+function serialize(::Query, args)
+    return Pair{String, String}[
+        string(name) => string(val) for (name, val) in args
+    ]
+end
+
+function build_url(url_pattern, serialized_args)
+    url = url_pattern
+    for (name, value) in serialized_args
+        url = replace(url, ('{' * string(name) * '}') => value)
+    end
+    return url
+end
 
 struct UnexpectedResponseError <: Exception
     code::Int
@@ -97,75 +138,38 @@ function get_headers_def(params)
     ))
 end
 
+
+function _serialize_request(req, params)::ExtractResult
+    grouped_extractors = _get_grouped_serializers(params)
+    res = HandlerParams()
+    for (type, extractors) in grouped_extractors
+        params = @? extract_params(type, req, extractors)
+        merge!(res, params)
+    end
+    return Ok(res)
+end
+
+function _get_grouped_serializers(params::NamedTuple)
+    type_to_extractors = Dict{Type, Dict{Symbol, Type}}()
+    for (name, type) in pairs(params)
+        outer = _outer_type(type)
+        dict = get!(type_to_extractors, outer, Dict{Symbol, Type}())
+        dict[name] = type
+    end
+    return type_to_extractors
+end
+
 function construct_expressions(cfg, path, method, sig, err_map)
     MacroTools.@capture(sig, route_name_(args__)::rettype_) ||
         error("Invalid endpoint signature. Maybe you forgot return type?")
     params = parse_params(args, path, route_name)
 
-    path_parts = Any[]
-    for arg in split(path, '/')
-        m = match(r"\{(\w+)\}", arg)
-        if isnothing(m)
-            push!(path_parts, arg)
-            continue
-        end
-        argname = only(m.captures)
-        argsym = Symbol(argname)
-        haskey(params, argsym) || error(
-            "\"$argname\" provided in path but has no corresponding parameter in signature",
-        )
-        push!(path_parts, argsym)
-    end
-
-    body_params = filter(((_, par),) -> par.loc == JSONFIELD, params)
-    full_body_param = filter(((_, par),) -> par.loc == JSONBODY, params)
-    query_params = filter(((_, par),) -> par.loc == QUERY, params)
-    url_params = filter(((_, par),) -> par.loc == URL, params)
-    headers_var, headers_def = get_headers_def(params)
-    if !isempty(body_params) && !isempty(full_body_param)
-        error("Cannot have Json and JsonField in one signature")
-    elseif !isempty(body_params)
-        body_type, body_def = construct_body_type(body_params, route_name)
-        create_body_expr = quote
-            req_body = $write_json($body_type(
-                $(keys(body_params)...)
-            ))
-        end
-    elseif !isempty(full_body_param)
-        length(full_body_param) == 1 ||
-            error("Cannot have multiple bodies in signature")
-        body_type = last(only(full_body_param)).type
-        body_def = nothing
-        create_body_expr = quote
-            req_body = $write_json($body_type(
-                $(only(keys(full_body_param)))
-            ))
-        end
-    else
-        body_def = nothing
-        body_type = nothing
-        create_body_expr = nothing
-    end
-
-
-    func_args = Iterators.map(params) do (argname, par)
-        if isnothing(par.default)
-            return :($(argname)::$(par.type))
+    stripped_args = Iterators.map(params) do (name, param)
+        if isnothing(param.default)
+            :($name::$(strip_meta(param.type)))
         else
-            return Expr(:kw, :($argname::$(par.type)), par.default)
+            Expr(:kw, :($name::$(strip_meta(param.type))), param.default)
         end
-    end |> collect
-    #! format: off
-    query_args = ( :($(string(name))=>string($name)) for name in keys(query_params))
-    url_patterm = if !isempty(url_params)
-        Expr(:string, get_path_parts(path_parts)...)
-    else
-        path
-    end
-    if rettype == :Nothing
-        ret_stmt = :(return nothing)
-    else
-        ret_stmt = :(return $read_json(resp.body, $rettype))
     end
 
     err_map_sym = gensym("errors_for_$route_name")
@@ -178,7 +182,7 @@ function construct_expressions(cfg, path, method, sig, err_map)
         res = esc(quote
             const $err_map_sym = $err_map
 
-            function $route_name($(func_args...))::$rettype
+            function $route_name($(stripped_args...))::$rettype
                 return Base.with_logger($cfg.logger) do
                     $headers_def
                     resp = $HTTP.request($method, $cfg.url * $url_patterm;

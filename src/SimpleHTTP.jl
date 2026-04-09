@@ -8,8 +8,8 @@ include("Server.jl")
 include("Client.jl")
 
 export HTTP, @ip_str, IPAddr
-import .Server: Server, ServerConfig
-export Server, ServerConfig
+import .Server: Server, Router
+export Server, Router
 
 import .Client: Client, ClientConfig
 export Client, ClientConfig

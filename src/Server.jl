@@ -3,23 +3,81 @@
 module Server
 
 using ..Common: make_response, report_error, ParamData, read_json,
-    parse_params, write_json, ArgLoc, serialize,
-    JSONFIELD, URL, QUERY, JSONBODY, ALLHEADERS, HEADER, ErrorResponse
+    write_json, ErrorResponse, MetaType, parse_params, strip_meta
 
 import OrderedCollections: OrderedDict
 import MacroTools
 import HTTP
 import Sockets: IPAddr, @ip_str
+using Try
+using Try: iserr
 
-@kwdef struct ServerConfig
-    ip::IPAddr
-    port::Int
+abstract type Extractor{T} <: MetaType end
+struct JsonField{T} <: Extractor{T} end
+struct Url{T} <: Extractor{T} end
+struct Query{T} <: Extractor{T} end
+struct JsonBody{T} <: Extractor{T} end
+struct Headers{T} <: Extractor{T} end
+struct Header{T, HdrName} <: Extractor{T} end
+
+struct Handler{F, Meta, RespSerializer}
+    impl::F
+    args_meta::Meta # Meta is NamedTuple
+    method::String
     path::String
-    router::HTTP.Router = HTTP.Router()
-    verbosity_500::Int
+    ser::RespSerializer
+    errors::Vector{Pair{Type, Int}}
 end
 
-get_query_params(req::HTTP.Request) = req.target |> HTTP.URI |> HTTP.queryparams
+abstract type ResponseSerializer{T} end
+struct JsonResponseSerializer{T} <: ResponseSerializer{T} end
+
+serialize_response(::JsonResponseSerializer, x) = write_json(x)
+
+@kwdef struct Router
+    router::HTTP.Router= HTTP.Router()
+    path::String
+    routes::Vector{Handler} = Handler[]
+    verbosity_500::Int = 0
+end
+
+function register!(router::Router, @nospecialize(hdl::Handler); with_internal = true)
+    if with_internal
+        register_internal!(router, hdl)
+    end
+    full_path = rstrip(router.path, '/') * '/' * lstrip(hdl.path, '/')
+    HTTP.register!(
+        router.router,
+        hdl.method,
+        full_path,
+        hdl,
+    )
+    push!(router.routes, hdl)
+end
+
+function register_internal!(router::Router, @nospecialize(hdl::Handler))
+    internal_path = "internal/" * lstrip(hdl.path, '/')
+    full_path = rstrip(router.path, '/') * '/' * internal_path
+    internal_hdl = Handler(
+        hdl.impl,
+        hdl.args_meta,
+        hdl.method,
+        internal_path,
+        hdl.ser,
+        hdl.errors,
+    )
+    HTTP.register!(
+        router.router,
+        internal_hdl.method,
+        full_path,
+        internal_hdl,
+    )
+    push!(router.routes, internal_hdl)
+end
+
+function serve!(router::Router, ip::IPAddr, port::Int; kw...)
+    return HTTP.serve!(router, ip, port; kw...)
+end
 
 function find_err_code(code_map, e::Exception)
     for (type, code) in code_map
@@ -44,16 +102,16 @@ function error_response(errors_map, e::Exception, verbosity_500::Int)
             err = "Internal server error"
         end
         return make_response(500,
-            serialize(ErrorResponse(err))
+            serialize_response(JsonResponseSerializer(), ErrorResponse(err))
         )
     end
-    return make_response(code, serialize(e))
+    return make_response(code, serialize_response(JsonResponseSerializer(), e))
 end
 
-function parsing_error_response(e::Exception, type::Type)
+function error_response(error::String)
     return make_response(
         422,
-        write_json(ErrorResponse("Error parsing type $type: $e")),
+        write_json(ErrorResponse(error)),
     )
 end
 
@@ -66,224 +124,223 @@ function no_param_provided_response(param_name::String, is_header::Bool)
     )
 end
 
-function construct_body_type(
-    fieldinfo::OrderedDict{Symbol, ParamData},
-    route_name::Symbol,
-)
-    fields = []
-    for (name, arg) in fieldinfo
-        @assert arg.loc == JSONFIELD
-        if !isnothing(arg.default)
-            type = :(Union{$(arg.type), Nothing})
-        else
-            type = arg.type
-        end
-        symname = Symbol(name)
-        push!(fields, :($symname::$type))
-    end
-
-    structname = gensym(Symbol("Body_For_" * string(route_name)))
-    return structname, esc(:(struct $structname
-        $(fields...)
-    end))
-end
-
 function normalize_headers(
     hdrs
 )
     return ((lowercase(hdr) => value) for (hdr, value) in hdrs)
 end
 
-function construct_handler(
-    params,
-    body_type,
-    rettype,
-    route_function::Symbol,
-    errors_map,
-    cfg_expr,
-)
-    arg_defs = []
-    resp_code = rettype == :Nothing ? 204 : 200
-    if !isnothing(body_type)
-        parsing = :(parsedbody = try
-            $read_json(req.body, $body_type)
-        catch e
-            $report_error(e)
-            return $parsing_error_response(e, $body_type)
-        end)
-    else
-        parsing = :(parsedbody = nothing)
-    end
+const HandlerParams = Dict{String, Any}
+const ExtractResult = Union{Ok{HandlerParams}, Err{String}}
 
-    for (argname, param) in params
-        argname_str = string(argname)
-        if param.loc == JSONFIELD
-            push!(arg_defs, :($argname = if !isnothing(parsedbody.$(argname))
-                parsedbody.$(argname)
-            else
-                $(param.default)
-            end))
-            continue
-        elseif param.loc == JSONBODY
-            push!(arg_defs, :($argname = parsedbody))
-            continue
-        elseif param.loc ∈ [URL, QUERY, HEADER]
-            if param.loc == HEADER
-                param_source = :req_headers
-                is_header = true
-                param_key = param.headerKey
-            else
-                param_source = :queryparams
-                is_header = false
-                param_key = argname_str
-            end
-            if isnothing(param.default)
-                push!(
-                    arg_defs,
-                    :(
-                        !$haskey($param_source, $param_key) &&
-                            return $no_param_provided_response($param_key, $is_header)
-                    ),
-                )
-            end
-            if param.type == :String || param.type == :AbstractString
-                push!(
-                    arg_defs,
-                    :($argname = $get($param_source, $param_key, $(param.default))),
-                )
-                continue
-            end
-            push!(
-                arg_defs,
-                :(
-                    $argname = if $haskey($param_source, $param_key)
-                        try
-                            $parse($(param.type), queryparams[$param_key])
-                        catch e
-                            $report_error(e)
-                            return $parsing_error_response(e, $(param.type))
-                        end
-                    else
-                        $(param.default)
-                    end
-                )
-            )
-            continue
-        elseif param.loc == ALLHEADERS
-            if !isnothing(param.default)
-                error("Having default for all headers for a server method is currently unsupported")
-            end
-            push!(
-                arg_defs,
-                :($argname = req_headers)
-            )
-            continue
-        else
-            error("Unknown parameter location $(param.loc)")
+function extract_params(::Type{Url}, req, arg_to_type)::ExtractResult
+    isempty(arg_to_type) && return HandlerParams()
+    params = HTTP.getparams(req)
+    res = HandlerParams()
+    isnothing(params) && return Ok(res)
+    for (k, v) in params
+        name = Symbol(k)
+        T = get(arg_to_type, name, nothing)
+        isnothing(T) && continue
+        try
+            res[name] = parse(first(T.parameters), v)
+        catch e
+            return Err("Error url param $name: $e")
         end
     end
-    handler_name = gensym(Symbol(string(route_function) * "_handler_"))
-    argnames = keys(params)
-    return handler_name,
-    esc(
-        quote
-            function $handler_name(req::HTTP.Request)
-                queryparams = $merge(
-                    $get_query_params(req),
-                    something($HTTP.getparams(req), Dict{String, String}()),
-                )
-                req_headers = Dict{String, String}($normalize_headers(req.headers)...)
-                $parsing
-                $(arg_defs...)
-                res = try
-                    $route_function($(argnames...))
-                catch e
-                    $report_error(e)
-                    return $error_response($errors_map, e, ($cfg_expr).verbosity_500)
-                end
-                return $make_response($resp_code, $serialize(res))
-            end
-        end,
-    )
+    return Ok(res)
 end
 
-function get_bodytype(params)
-    body_params = filter(((_, par),) -> par.loc == JSONFIELD, params)
-    body_type_param = filter(((_, par),) -> par.loc == JSONBODY, params)
-    if !isempty(body_params) && !isempty(body_type_param)
-        error("Cannot have Json and JsonField in one signature")
-    elseif !isempty(body_params)
-        body_type, body_def = construct_body_type(body_params, route_name)
-    elseif !isempty(body_type_param)
-        length(body_type_param) == 1 ||
-            error("Cannot have multiple bodies in signature")
-        body_type = last(only(body_type_param)).type
-        body_def = nothing
-    else
-        body_def = nothing
-        body_type = nothing
+function extract_params(::Type{Query}, req, arg_to_type)::ExtractResult
+    isempty(arg_to_type) && return HandlerParams()
+    params = HTTP.queryparams(req)
+    res = HandlerParams()
+
+    for (k, v) in params
+        name = Symbol(k)
+        T = get(arg_to_type, name, nothing)
+        isnothing(T) && continue
+        try
+            res[name] = parse(first(T.parameters), v)
+        catch
+            return Err("Error parsing query param $name: $e")
+        end
     end
-    return body_def, body_type
+    return Ok(res)
 end
 
-function create_route_bodies(path, func, cfg, errors)
+function extract_params(::Type{JsonField}, req, arg_to_type)::ExtractResult
+    isempty(arg_to_type) && return HandlerParams()
+    json = JSON.lazy(req.body)
+    res = HandlerParams()
+    try
+        for (k, v) in json
+            name = Symbol(k)
+            T = get(arg_to_type, name, nothing)
+            isnothing(T) && continue
+            res[k] = JSON.parse(v, first(T.parameters); allow_nan = true)
+        end
+    catch e
+        Err("Error parsing json: $e")
+    end
+    return Ok(res)
+end
+
+function extract_params(::Type{Header}, req, arg_to_type)::ExtractResult
+    isempty(arg_to_type) && return HandlerParams()
+    argname = only(keys(arg_to_type))
+    hdr = string(Sym)
+    res = HandlerParams()
+    try
+        for (k, v) in req.headers
+            name = Symbol(k)
+            T = get(arg_to_type, name, nothing)
+            isnothing(T) && continue
+            type = first(T.parameters)
+            if type isa Type{<:AbstractString}
+                res[T.parameters[2]] = string(v)
+            end
+            res[argname] = parse(T, v)
+        end
+    catch e
+        Err("Error parsing header: $hdr $e")
+    end
+    return Ok(res)
+end
+
+function extract_params(::Type{JsonBody}, req, arg_to_type)::ExtractResult
+    isempty(arg_to_type) && return HandlerParams()
+    argname = only(keys(arg_to_type))
+    T = only(values(arg_to_type)).parameters |> first
+    try
+        return HandlerParams(argname => JSON.parse(v, T; allow_nan = true))
+    catch e
+        Err("Error parsing header: $hdr $e")
+    end
+    return Ok(res)
+end
+
+function _outer_type(::Type{T}) where T
+    return T.name.wrapper
+end
+
+function _get_grouped_extractors(params::NamedTuple)
+    type_to_extractors = Dict{Type, Dict{Symbol, Type}}()
+    for (name, type) in pairs(params)
+
+        outer = _outer_type(type)
+        dict = get!(type_to_extractors, outer, Dict{Symbol, Type}())
+        dict[name] = type
+
+    end
+    return type_to_extractors
+end
+
+function _extract_params(req, params)::ExtractResult
+    grouped_extractors = _get_grouped_extractors(params)
+    res = HandlerParams()
+    for (type, extractors) in grouped_extractors
+        params = @? extract_params(type, req, extractors)
+        merge!(res, params)
+    end
+    return Ok(res)
+end
+
+function _get_bodytype(mod, rettype)
+    type = Core.eval(mod, rettype)
+    if type isa Type{ResponseSerializer}
+        return type
+    else
+        return JsonResponseSerializer{type}
+    end
+end
+
+function create_route(mod, path, func, method, err_map)
     #! format: off
-    MacroTools.@capture(func, function route_name_(args__)::rettype_
+    MacroTools.@capture(func, function route_name_(args__)::rettype_expr_
         functionbody_
     end) || error("Invalid route signature. Maybe you forgot return type?")
     #! format: on
     func_args = Any[]
-    params = parse_params(args, path, route_name)
+    params = parse_params(mod, args, path, route_name)
 
-    for arg in split(path, '/')
-        m = match(r"\{(\w+)\}", arg)
-        isnothing(m) && continue
-        argname = only(m.captures)
-        haskey(params, Symbol(argname)) || error(
-            "\"$argname\" provided in path but has no corresponding parameter in signature",
-        )
+    body_ser = _get_bodytype(mod, rettype_expr)
+    rettype = strip_meta(body_ser)
+    argdefs = []
+
+    for (argname, param) in params
+        if !isnothing(param.default)
+            push!(argdefs, :(
+                $argname = $get(args, $(QuoteNode(argname))) do
+                    $(param.default)
+                end)
+            )
+        else
+            push!(argdefs, quote
+                $argname = $get(args, $(QuoteNode(argname)), missing)
+                if $ismissing($argname)
+                    return $no_param_provided_response($(string(argname)), false)
+                end
+            end)
+        end
     end
 
-    body_def, body_type = get_bodytype(params)
-    errors_var = gensym("errors_for_$route_name")
-    errors_def = esc(:(const $errors_var = $errors))
+    stripped_args = Iterators.map(params) do (name, param)
+        if isnothing(param.default)
+            :($name::$(strip_meta(param.type)))
+        else
+            Expr(:kw, :($name::$(strip_meta(param.type))), param.default)
+        end
+    end
+
     func_args = Iterators.map(params) do (argname, par)
-        return :($(argname)::$(par.type))
-    end |> collect
-    #! format: off
-    handler_func = esc(:(function $route_name($(func_args...))
-        $functionbody
-    end))
-    #! format: on
-    handler_name, handler =
-        construct_handler(params, body_type, rettype, route_name, errors_var, cfg)
-    return errors_def, handler_name, body_def, handler_func, handler
-end
-
-function create_route(cfg, path::String, method::String, handler::Expr, errors)
-    errors_def, handler_name, body_def, handler_func, handler =
-        create_route_bodies(path, handler, cfg, errors)
-    return quote
-        $errors_def
-        $body_def
-        $handler_func
-        $handler
-        $HTTP.register!(
-            $(esc(cfg)).router,
-            $method,
-            $(esc(cfg)).path * $path,
-            $(esc(handler_name)),
-        )
+        return :($(argname)::$(strip_meta(par.type)))
     end
-end
 
-function serve(cfg::ServerConfig)
-    HTTP.serve(cfg.router, cfg.port)
-end
+    argnames = collect(keys(params))
+    #! format: off
+    handler_impl = :(function ($(func_args...),)
+        $functionbody
+    end)
 
+    handler_func = :(function (__handler_self::$typeof($route_name))($(stripped_args...))::$rettype
+        return __handler_self.impl($(keys(params)...))
+    end)
 
-function serve!(cfg::ServerConfig)
-    HTTP.serve!(cfg.router, cfg.port)
+    http_handler = :(
+        function (__handler_self::$typeof($route_name))(req::$(HTTP.Request))
+            maybe_args = $_extract_params(req, __handler_self.args_meta)
+            if $iserr(maybe_args)
+                return $error_response(maybe_args.value)
+            end
+            args = maybe_args.value
+            $(argdefs...)
+            res = try
+                __handler_self($(argnames...))
+            catch e
+                $report_error(e)
+                return $error_response(__handler_self.errors, e, 1)
+            end
+            code = isnothing(res) ? 204 : 200
+            return $make_response(code, $serialize_response(__handler_self.ser, res))
+        end
+    )
+    #! format: on
+    esc(
+        quote
+            const $route_name = $Handler(
+                $handler_impl,
+                $(Expr(:tuple, (:($name = $(param.type)) for (name, param) in params)...)),
+                $method,
+                $path,
+                $body_ser,
+                $err_map
+            )
+            $handler_func,
+            $http_handler
+        end,
+    )
+
 end
 
 @doc raw"""
@@ -297,20 +354,20 @@ API.@get(
 )
 ```
 """
-macro get(cfg, path, handler, errors)
-    return create_route(cfg, path, "GET", handler, errors)
+macro get(path, handler, err_map)
+    return create_route(__module__, path, handler, "GET", err_map)
 end
 
-macro post(cfg, path, handler, errors)
-    return create_route(cfg, path, "POST", handler, errors)
+macro post(path, handler, err_map)
+    return create_route(__module__, path, handler, "POST", err_map)
 end
 
-macro delete(cfg, path, handler, errors)
-    return create_route(cfg, path, "DELETE", handler, errors)
+macro delete(path, handler, err_map)
+    return create_route(__module__, path, handler, "POST", err_map)
 end
 
-macro put(cfg, path, handler, errors)
-    return create_route(cfg, path, "PUT", handler, errors)
+macro put(path, handler, err_map)
+    return create_route(__module__, path, handler, "PUT", err_map)
 end
 
 end
