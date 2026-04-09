@@ -2,7 +2,6 @@
 using SimpleHTTP
 using Test
 
-
 include("server.jl")
 include("client.jl")
 
@@ -55,7 +54,7 @@ end
 
     default_headers = Dict{String, String}(
         "accept-language" => "ru",
-        "auth" => "secret_token"
+        "auth" => "secret_token",
     )
 
     res = App.echo_headers_with_default()
@@ -63,4 +62,25 @@ end
 
     res = App.echo_headers_with_default(Dict{String, String}())
     @test all(!haskey(res, k) for k in keys(default_headers))
+end
+
+@testset "json array responses" begin
+    id1 = App.create_user("Alice", 30)
+    id2 = App.create_user("Bob", 25)
+    id3 = App.create_user("Carol", 35)
+
+    names = App.get_user_names()
+    @test names isa Vector{String}
+    @test names == ["Alice", "Bob", "Carol"]
+
+    ages = App.get_user_ages()
+    @test ages isa Vector{Int}
+    @test ages == [25, 30, 35]
+
+    App.delete_user(id1)
+    App.delete_user(id2)
+    App.delete_user(id3)
+
+    @test App.get_user_names() == String[]
+    @test App.get_user_ages() == Int[]
 end

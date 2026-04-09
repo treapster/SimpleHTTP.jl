@@ -1,0 +1,6 @@
+.env
+.git-credentials
+.vscode
+Makefile.local
+
+Manifest.toml

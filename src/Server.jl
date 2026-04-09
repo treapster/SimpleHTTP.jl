@@ -1,10 +1,22 @@
 
-
 module Server
 
-using ..Common: make_response, report_error, ParamData, read_json,
-    parse_params, write_json, ArgLoc, serialize,
-    JSONFIELD, URL, QUERY, JSON, ALLHEADERS, HEADER, ErrorResponse
+using ..Common:
+    make_response,
+    report_error,
+    ParamData,
+    read_json,
+    parse_params,
+    write_json,
+    ArgLoc,
+    serialize,
+    JSONFIELD,
+    URL,
+    QUERY,
+    JSON,
+    ALLHEADERS,
+    HEADER,
+    ErrorResponse
 
 import OrderedCollections: OrderedDict
 import MacroTools
@@ -43,9 +55,7 @@ function error_response(errors_map, e::Exception, verbosity_500::Int)
         else
             err = "Internal server error"
         end
-        return make_response(500,
-            serialize(ErrorResponse(err))
-        )
+        return make_response(500, serialize(ErrorResponse(err)))
     end
     return make_response(code, serialize(e))
 end
@@ -61,7 +71,9 @@ function no_param_provided_response(param_name::String, is_header::Bool)
     return make_response(
         422,
         write_json(
-            ErrorResponse("Required $(is_header ? "header" : "parameter") \"$param_name\" not provided"),
+            ErrorResponse(
+                "Required $(is_header ? "header" : "parameter") \"$param_name\" not provided",
+            ),
         ),
     )
 end
@@ -88,9 +100,7 @@ function construct_body_type(
     end))
 end
 
-function normalize_headers(
-    hdrs
-)
+function normalize_headers(hdrs)
     return ((lowercase(hdr) => value) for (hdr, value) in hdrs)
 end
 
@@ -118,11 +128,14 @@ function construct_handler(
     for (argname, param) in params
         argname_str = string(argname)
         if param.loc == JSONFIELD
-            push!(arg_defs, :($argname = if !isnothing(parsedbody.$(argname))
-                parsedbody.$(argname)
-            else
-                $(param.default)
-            end))
+            push!(
+                arg_defs,
+                :($argname = if !isnothing(parsedbody.$(argname))
+                    parsedbody.$(argname)
+                else
+                    $(param.default)
+                end),
+            )
             continue
         elseif param.loc == JSON
             push!(arg_defs, :($argname = parsedbody))
@@ -142,14 +155,20 @@ function construct_handler(
                     arg_defs,
                     :(
                         !$haskey($param_source, $param_key) &&
-                            return $no_param_provided_response($param_key, $is_header)
+                        return $no_param_provided_response(
+                            $param_key,
+                            $is_header,
+                        )
                     ),
                 )
             end
             if param.type == :String || param.type == :AbstractString
                 push!(
                     arg_defs,
-                    :($argname = $get($param_source, $param_key, $(param.default))),
+                    :(
+                        $argname =
+                            $get($param_source, $param_key, $(param.default))
+                    ),
                 )
                 continue
             end
@@ -166,17 +185,16 @@ function construct_handler(
                     else
                         $(param.default)
                     end
-                )
+                ),
             )
             continue
         elseif param.loc == ALLHEADERS
             if !isnothing(param.default)
-                error("Having default for all headers for a server method is currently unsupported")
+                error(
+                    "Having default for all headers for a server method is currently unsupported",
+                )
             end
-            push!(
-                arg_defs,
-                :($argname = req_headers)
-            )
+            push!(arg_defs, :($argname = req_headers))
             continue
         else
             error("Unknown parameter location $(param.loc)")
@@ -192,14 +210,19 @@ function construct_handler(
                     $get_query_params(req),
                     something($HTTP.getparams(req), Dict{String, String}()),
                 )
-                req_headers = Dict{String, String}($normalize_headers(req.headers)...)
+                req_headers =
+                    Dict{String, String}($normalize_headers(req.headers)...)
                 $parsing
                 $(arg_defs...)
                 res = try
                     $route_function($(argnames...))
                 catch e
                     $report_error(e)
-                    return $error_response($errors_map, e, ($cfg_expr).verbosity_500)
+                    return $error_response(
+                        $errors_map,
+                        e,
+                        ($cfg_expr).verbosity_500,
+                    )
                 end
                 return $make_response($resp_code, $serialize(res))
             end
@@ -255,8 +278,14 @@ function create_route_bodies(path, func, cfg, errors)
         $functionbody
     end))
     #! format: on
-    handler_name, handler =
-        construct_handler(params, body_type, rettype, route_name, errors_var, cfg)
+    handler_name, handler = construct_handler(
+        params,
+        body_type,
+        rettype,
+        route_name,
+        errors_var,
+        cfg,
+    )
     return errors_def, handler_name, body_def, handler_func, handler
 end
 
@@ -278,12 +307,11 @@ function create_route(cfg, path::String, method::String, handler::Expr, errors)
 end
 
 function serve(cfg::ServerConfig)
-    HTTP.serve(cfg.router, cfg.port)
+    return HTTP.serve(cfg.router, cfg.port)
 end
 
-
 function serve!(cfg::ServerConfig)
-    HTTP.serve!(cfg.router, cfg.port)
+    return HTTP.serve!(cfg.router, cfg.port)
 end
 
 @doc raw"""

@@ -49,8 +49,7 @@ end
 
 function error_string(e::T) where {T <: Exception}
     flds = fieldnames(T)
-    if length(flds) == 1 &&
-        only(fieldtypes(T))  <: AbstractString
+    if length(flds) == 1 && only(fieldtypes(T)) <: AbstractString
         return getproperty(e, only(flds))
     end
     return string(e)
@@ -97,6 +96,31 @@ function parse_params(args, path, route_name)
     params = OrderedDict{Symbol, ParamData}()
 
     for arg_expr in args
+        # Handle keyword arguments block (semicolon syntax: f(; kw::T = default))
+        if isa(arg_expr, Expr) && arg_expr.head == :parameters
+            for kw_expr in arg_expr.args
+                argdefault = nothing
+                if isa(kw_expr, Expr) && kw_expr.head == :kw
+                    typed_arg = kw_expr.args[1]
+                    argdefault = kw_expr.args[2]
+                    MacroTools.@capture(typed_arg, argname_Symbol::argtype_) ||
+                        error(
+                            "route $route_name: invalid keyword argument $kw_expr",
+                        )
+                else
+                    MacroTools.@capture(kw_expr, argname_Symbol::argtype_) ||
+                        error(
+                            "route $route_name: invalid keyword argument $kw_expr",
+                        )
+                end
+                haskey(params, argname) &&
+                    error("route $route_name: duplicate argument $argname")
+                params[argname] =
+                    get_param_data(argname, argtype, path, argdefault)
+            end
+            continue
+        end
+
         argdefault = nothing
         MacroTools.@capture(arg_expr, argname_Symbol::argtype_ = argdefault_) ||
             MacroTools.@capture(arg_expr, argname_Symbol::argtype_) ||

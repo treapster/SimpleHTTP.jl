@@ -1,9 +1,23 @@
 
 module Client
 
-using ..Common: make_response, report_error, ParamData, read_json,
-    parse_params, write_json, ArgLoc, ErrorResponse, deserialize,
-    JSONFIELD, QUERY, URL, JSONFIELD, JSON, ALLHEADERS, HEADER
+using ..Common:
+    make_response,
+    report_error,
+    ParamData,
+    read_json,
+    parse_params,
+    write_json,
+    ArgLoc,
+    ErrorResponse,
+    deserialize,
+    JSONFIELD,
+    QUERY,
+    URL,
+    JSONFIELD,
+    JSON,
+    ALLHEADERS,
+    HEADER
 
 import OrderedCollections: OrderedDict
 import MacroTools
@@ -69,10 +83,7 @@ end
 
 function get_exception(resp, err_map)
     if !haskey(err_map, resp.status)
-        throw(UnexpectedResponseError(
-            resp.status,
-            get_error(resp)
-        ))
+        throw(UnexpectedResponseError(resp.status, get_error(resp)))
     end
     type = err_map[resp.status]
     return deserialize(resp.body, type)
@@ -82,7 +93,9 @@ function get_headers_def(params)
     headers = filter(((_, par),) -> par.loc == HEADER, params)
     all_headers = filter(((_, par),) -> par.loc == ALLHEADERS, params)
     if !isempty(headers) && !isempty(all_headers)
-        error("Cannot have individual headers and generel Headers in one signature")
+        error(
+            "Cannot have individual headers and generel Headers in one signature",
+        )
     end
     if isempty(headers) && isempty(all_headers)
         return :headers, :(headers = Dict{String, String}())
@@ -92,9 +105,7 @@ function get_headers_def(params)
         return :headers, :(headers = $var_name)
     end
     pairs = (:($(par.headerKey) => $var_name) for (var_name, par) in headers)
-    return :headers, :(headers = Dict{String, String}(
-        $(pairs...)
-    ))
+    return :headers, :(headers = Dict{String, String}($(pairs...)))
 end
 
 function construct_expressions(cfg, path, method, sig, err_map)
@@ -127,9 +138,7 @@ function construct_expressions(cfg, path, method, sig, err_map)
     elseif !isempty(body_params)
         body_type, body_def = construct_body_type(body_params, route_name)
         create_body_expr = quote
-            req_body = $write_json($body_type(
-                $(keys(body_params)...)
-            ))
+            req_body = $write_json($body_type($(keys(body_params)...)))
         end
     elseif !isempty(full_body_param)
         length(full_body_param) == 1 ||
@@ -137,9 +146,7 @@ function construct_expressions(cfg, path, method, sig, err_map)
         body_type = last(only(full_body_param)).type
         body_def = nothing
         create_body_expr = quote
-            req_body = $write_json($body_type(
-                $(only(keys(full_body_param)))
-            ))
+            req_body = $write_json($body_type($(only(keys(full_body_param)))))
         end
     else
         body_def = nothing
@@ -147,14 +154,14 @@ function construct_expressions(cfg, path, method, sig, err_map)
         create_body_expr = nothing
     end
 
-
-    func_args = Iterators.map(params) do (argname, par)
-        if isnothing(par.default)
-            return :($(argname)::$(par.type))
-        else
-            return Expr(:kw, :($argname::$(par.type)), par.default)
-        end
-    end |> collect
+    func_args =
+        Iterators.map(params) do (argname, par)
+            if isnothing(par.default)
+                return :($(argname)::$(par.type))
+            else
+                return Expr(:kw, :($argname::$(par.type)), par.default)
+            end
+        end |> collect
     #! format: off
     query_args = ( :($(string(name))=>string($name)) for name in keys(query_params))
     url_patterm = if !isempty(url_params)
